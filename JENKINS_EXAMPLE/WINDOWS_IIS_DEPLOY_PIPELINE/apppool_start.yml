@@ -1,0 +1,28 @@
+---
+- name: Iniciar AppPool IIS
+  hosts: iis
+  gather_facts: false
+
+  vars:
+    apppool_name: "{{ apppool_name }}"
+
+  tasks:
+    - name: Iniciar AppPool
+      win_shell: |
+        Import-Module WebAdministration
+        Start-WebAppPool -Name "{{ apppool_name }}"
+
+    - name: Validar estado do AppPool
+      win_shell: |
+        Import-Module WebAdministration
+        (Get-WebAppPoolState -Name "{{ apppool_name }}").Value
+      register: pool_state
+
+    - name: Falhar se AppPool não estiver iniciado
+      fail:
+        msg: "AppPool {{ apppool_name }} não iniciou corretamente (estado: {{ pool_state.stdout }})"
+      when: pool_state.stdout.strip() != "Started"
+
+    - name: AppPool iniciado com sucesso
+      debug:
+        msg: "AppPool {{ apppool_name }} iniciado"

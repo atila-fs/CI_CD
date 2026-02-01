@@ -1,0 +1,121 @@
+---
+- name: Deploy via rsync com staging e validação de integridade
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: yes
+
+  vars:
+    staging_root: "/tmp/deploy_staging"
+    staging_dir: "{{ staging_root }}/{{ service_name }}"
+
+  tasks:
+    - name: Debug das variáveis recebidas
+      ansible.builtin.debug:
+        msg:
+          - "ZIP: {{ zip_path }}"
+          - "Destino: {{ dest_path }}"
+          - "Service: {{ service_name }}"
+
+    - name: Verificar se ZIP existe
+      ansible.builtin.stat:
+        path: "{{ zip_path }}"
+      register: zip_check
+
+    - name: Falhar se ZIP não existir
+      ansible.builtin.fail:
+        msg: "ZIP {{ zip_path }} não encontrado"
+      when: not zip_check.stat.exists
+
+    - name: Verificar se destino existe
+      ansible.builtin.stat:
+        path: "{{ dest_path }}"
+      register: dest_check
+
+    - name: Falhar se destino não existir
+      ansible.builtin.fail:
+        msg: "Destino {{ dest_path }} não existe"
+      when: not dest_check.stat.exists
+
+    - name: Remover staging anterior
+      ansible.builtin.file:
+        path: "{{ staging_dir }}"
+        state: absent
+
+    - name: Criar staging
+      ansible.builtin.file:
+        path: "{{ staging_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Extrair ZIP no staging
+      ansible.builtin.unarchive:
+        src: "{{ zip_path }}"
+        dest: "{{ staging_dir }}"
+        remote_src: yes
+
+    - name: Calcular hash do staging
+      ansible.builtin.shell: |
+        (cd "{{ staging_dir }}" && \
+         find . -type f -exec sha256sum {} \; | sort | sha256sum | awk '{print $1}')
+      args:
+        executable: /bin/bash
+      register: staging_hash
+      changed_when: false
+
+    - name: Calcular hash do destino (antes da limpeza)
+      ansible.builtin.shell: |
+        (cd "{{ dest_path }}" && \
+         find . -type f -exec sha256sum {} \; | sort | sha256sum | awk '{print $1}')
+      args:
+        executable: /bin/bash
+      register: dest_hash_before
+      changed_when: false
+
+    - name: Limpar conteúdo anterior no destino (mesma lógica do playbook antigo)
+      ansible.builtin.shell: |
+        find "{{ dest_path }}" -type f -exec rm -f {} \; ;
+        find "{{ dest_path }}" -type d -mindepth 1 -empty -delete
+      args:
+        executable: /bin/bash
+
+    - name: Sincronizar staging para destino (rsync com log e timestamp)
+      ansible.builtin.shell: |
+        timestamp=$(date +%d%m%H%M)
+        logfile="/tmp/deploy_rsync_{{ service_name }}_${timestamp}.log"
+
+        rsync -aP --log-file="$logfile" \
+          --no-owner --no-group \
+          "{{ staging_dir }}/" \
+          "{{ dest_path }}/"
+      args:
+        executable: /bin/bash
+
+    - name: Calcular hash do destino (após rsync)
+      ansible.builtin.shell: |
+        (cd "{{ dest_path }}" && \
+         find . -type f -exec sha256sum {} \; | sort | sha256sum | awk '{print $1}')
+      args:
+        executable: /bin/bash
+      register: dest_hash_after
+      changed_when: false
+
+    - name: Verificar integridade (staging vs destino)
+      ansible.builtin.fail:
+        msg: |
+          Falha de integridade no deploy!
+          Staging : {{ staging_hash.stdout }}
+          Destino : {{ dest_hash_after.stdout }}
+      when: staging_hash.stdout != dest_hash_after.stdout
+
+    - name: Remover staging
+      ansible.builtin.file:
+        path: "{{ staging_dir }}"
+        state: absent
+
+    - name: Sucesso — deploy validado (hash OK)
+      ansible.builtin.debug:
+        msg: |
+          Deploy OK (hash bateu).
+          Destino antes: {{ dest_hash_before.stdout }}
+          Destino depois: {{ dest_hash_after.stdout }}

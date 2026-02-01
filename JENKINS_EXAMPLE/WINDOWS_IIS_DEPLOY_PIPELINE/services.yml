@@ -1,0 +1,6 @@
+services:
+  nome-da-api:
+    squad: "colocar nome da squad aqui"
+    apppool_name: "colocar nome do pool aqui"
+    zip_name: "colocar nome do zip aqui"
+    dest_path: "colocar o nome do caminho da API no servidor"

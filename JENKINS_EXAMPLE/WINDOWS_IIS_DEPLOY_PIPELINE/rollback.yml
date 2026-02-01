@@ -1,0 +1,90 @@
+---
+- name: Rollback via rsync a partir do backup da RDM (com validação de integridade)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    backup_root: "/mnt/backups"
+    backup_dir: "{{ backup_root }}/{{ service_name }}/{{ rdm }}"
+
+  tasks:
+    - name: Debug das variáveis recebidas
+      debug:
+        msg:
+          - "Destino (dest_path): {{ dest_path }}"
+          - "Backup (backup_dir): {{ backup_dir }}"
+          - "Service: {{ service_name }}"
+          - "RDM: {{ rdm }}"
+
+    - name: Normalizar dest_path (remove CRLF e espaços no final)
+      set_fact:
+        dest_path_clean: "{{ dest_path | regex_replace('\r','') | regex_replace('\\s+$','') }}"
+
+    - name: Verificar se backup_dir existe
+      ansible.builtin.stat:
+        path: "{{ backup_dir }}"
+      register: backup_check
+
+    - name: Falhar se backup_dir não existir
+      ansible.builtin.fail:
+        msg: "Backup não encontrado: {{ backup_dir }}"
+      when: not backup_check.stat.exists
+
+    - name: Verificar se destino existe
+      ansible.builtin.stat:
+        path: "{{ dest_path_clean }}"
+      register: dest_check
+
+    - name: Falhar se destino não existir
+      ansible.builtin.fail:
+        msg: "Destino não existe: {{ dest_path_clean }}"
+      when: not dest_check.stat.exists
+
+    - name: Calcular hash do backup (origem do rollback)
+      ansible.builtin.shell: |
+        (cd "{{ backup_dir }}" && \
+         find . -type f -exec sha256sum {} \; | sort | sha256sum | awk '{print $1}')
+      args:
+        executable: /bin/bash
+      register: backup_hash
+      changed_when: false
+
+    - name: Limpar conteúdo anterior no destino (mesma lógica do playbook antigo)
+      ansible.builtin.shell: |
+        find "{{ dest_path_clean }}" -type f ! -name "ConfigManagerArgs.json" -exec rm -f {} \;
+        find "{{ dest_path_clean }}" -type d -mindepth 1 -empty -delete
+      args:
+        executable: /bin/bash
+
+    - name: Aplicar rollback via rsync (log com timestamp)
+      ansible.builtin.shell: |
+        timestamp=$(date +%d%m%H%M)
+        logfile="/tmp/rollback_rsync_${timestamp}.log"
+        rsync -aP --log-file="$logfile" \
+          "{{ backup_dir }}/" \
+          "{{ dest_path_clean }}/"
+        echo "LOG: $logfile"
+      args:
+        executable: /bin/bash
+
+    - name: Calcular hash do destino (após rollback)
+      ansible.builtin.shell: |
+        (cd "{{ dest_path_clean }}" && \
+         find . -type f -exec sha256sum {} \; | sort | sha256sum | awk '{print $1}')
+      args:
+        executable: /bin/bash
+      register: dest_hash_after
+      changed_when: false
+
+    - name: Validar integridade do rollback
+      ansible.builtin.fail:
+        msg: |
+          Rollback inválido!
+          Backup  : {{ backup_hash.stdout }}
+          Destino : {{ dest_hash_after.stdout }}
+      when: backup_hash.stdout != dest_hash_after.stdout
+
+    - name: Rollback validado com sucesso
+      ansible.builtin.debug:
+        msg: "Rollback OK (hash bateu)."

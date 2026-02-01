@@ -1,0 +1,134 @@
+---
+- name: Equiparar publicação via rsync com validação de integridade
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: true
+
+  vars:
+    mount_root: "/mnt"
+    default_target_host: "<staging_server_name>"
+
+  tasks:
+    - name: Debug das variáveis recebidas
+      debug:
+        msg:
+          - "Destino atual (origem da equiparação): {{ dest_path }}"
+          - "Target host (recebido): {{ target_host | default('NÃO INFORMADO') }}"
+          - "Target host (default): {{ default_target_host }}"
+
+    - name: Normalizar dest_path (remove CRLF e espaços no final)
+      set_fact:
+        dest_path_clean: "{{ dest_path | regex_replace('\r','') | regex_replace('\\s+$','') }}"
+
+    - name: Extrair host atual do dest_path (/mnt/<HOST>/...)
+      set_fact:
+        current_host: "{{ (dest_path_clean | regex_findall('^/mnt/([^/]+)/') | first) | default('') }}"
+
+    - name: Falhar se não conseguir extrair host do caminho
+      fail:
+        msg: "Não foi possível extrair o host do caminho: {{ dest_path_clean }} (esperado /mnt/<HOST>/...)"
+      when: current_host | length == 0
+
+    - name: Definir target_host efetivo (usa default se não vier)
+      set_fact:
+        target_host_effective: "{{ target_host | default(default_target_host) }}"
+
+    - name: Garantir target_host como string (se vier como lista)
+      set_fact:
+        target_host_clean: >-
+          {{
+            (target_host_effective is sequence and target_host_effective is not string)
+            | ternary((target_host_effective | first), target_host_effective)
+          }}
+
+    - name: Montar source_path e target_path
+      set_fact:
+        source_path: "{{ dest_path_clean }}"
+        target_path: "{{ dest_path_clean | regex_replace('^/mnt/' ~ current_host ~ '/', '/mnt/' ~ target_host_clean ~ '/') }}"
+
+    - name: Proteção falhar se target_path ficou igual ao source_path
+      fail:
+        msg: |
+          Proteção acionada: target_path ficou igual ao source_path.
+          source_path={{ source_path }}
+          target_path={{ target_path }}
+          current_host={{ current_host }}
+          target_host_clean={{ target_host_clean }}
+      when: target_path == source_path
+
+    - name: Debug paths
+      debug:
+        msg:
+          - "Source path: {{ source_path }}"
+          - "Target path: {{ target_path }}"
+
+    - name: Verificar se source_path existe
+      stat:
+        path: "{{ source_path }}"
+      register: source_check
+
+    - name: Falhar se source_path não existir
+      fail:
+        msg: "Origem não existe: {{ source_path }}"
+      when: not source_check.stat.exists
+
+    - name: Verificar se target_path existe
+      stat:
+        path: "{{ target_path }}"
+      register: target_check
+
+    - name: Falhar se target_path não existir
+      fail:
+        msg: "Destino não existe: {{ target_path }}"
+      when: not target_check.stat.exists
+
+    - name: Calcular hash da origem (source_path)
+      shell: |
+        (cd "{{ source_path }}" && \
+         find . -type f -exec sha256sum {} \; | sort | sha256sum | awk '{print $1}')
+      args:
+        executable: /bin/bash
+      register: source_hash
+      changed_when: false
+
+    - name: Limpar conteúdo anterior no destino (exceto ConfigManagerArgs.json em qualquer nível)
+      shell: |
+        find "{{ target_path }}" -type f ! -name "ConfigManagerArgs.json" -exec rm -f {} \; ;
+        find "{{ target_path }}" -type d -mindepth 1 -empty -delete
+      args:
+        executable: /bin/bash
+
+    - name: Sincronizar diretório via rsync (log com timestamp) - origem -> destino
+      shell: |
+        timestamp=$(date +%d%m%H%M)
+        logfile="/tmp/equiparar_rsync_${timestamp}.log"
+        rsync -aP --log-file="$logfile" \
+          "{{ source_path }}/" \
+          "{{ target_path }}/"
+      args:
+        executable: /bin/bash
+      register: rsync_out
+
+    - name: Calcular hash do destino (target_path) após rsync
+      shell: |
+        (cd "{{ target_path }}" && \
+         find . -type f -exec sha256sum {} \; | sort | sha256sum | awk '{print $1}')
+      args:
+        executable: /bin/bash
+      register: target_hash
+      changed_when: false
+
+    - name: Verificar integridade (origem vs destino)
+      fail:
+        msg: |
+          Falha de integridade na equiparação!
+          Origem (source): {{ source_hash.stdout }}
+          Destino (target): {{ target_hash.stdout }}
+          source_path: {{ source_path }}
+          target_path: {{ target_path }}
+      when: source_hash.stdout != target_hash.stdout
+
+    - name: Equiparação validada com sucesso
+      debug:
+        msg: "Equiparação OK (hash bateu)."

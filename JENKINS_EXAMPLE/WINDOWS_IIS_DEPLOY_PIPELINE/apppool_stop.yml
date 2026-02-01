@@ -1,0 +1,38 @@
+---
+- name: Parar AppPool IIS
+  hosts: iis
+  gather_facts: false
+
+  vars:
+    apppool_name: "{{ apppool_name }}"
+
+  tasks:
+    - name: Verificar se AppPool existe
+      win_shell: |
+        Import-Module WebAdministration
+        if (Test-Path "IIS:\AppPools\{{ apppool_name }}") {
+          Write-Output "EXISTS"
+        } else {
+          Write-Error "AppPool {{ apppool_name }} não existe"
+          exit 1
+        }
+
+    - name: Parar AppPool
+      win_shell: |
+        Import-Module WebAdministration
+        Stop-WebAppPool -Name "{{ apppool_name }}"
+
+    - name: Validar estado do AppPool
+      win_shell: |
+        Import-Module WebAdministration
+        (Get-WebAppPoolState -Name "{{ apppool_name }}").Value
+      register: pool_state
+
+    - name: Falhar se AppPool não estiver parado
+      fail:
+        msg: "AppPool {{ apppool_name }} não está parado (estado: {{ pool_state.stdout }})"
+      when: pool_state.stdout.strip() != "Stopped"
+
+    - name: AppPool parado com sucesso
+      debug:
+        msg: "AppPool {{ apppool_name }} parado"

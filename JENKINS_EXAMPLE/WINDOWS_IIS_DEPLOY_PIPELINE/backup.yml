@@ -1,0 +1,87 @@
+---
+- name: Backup com validação de integridade
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    backup_root: "/mnt/backups"
+    backup_dir: "{{ backup_root }}/{{ service_name }}/{{ rdm | default('sem_rdm') }}"
+
+  tasks:
+    - name: DEBUG dest_path (raw)
+      debug:
+        var: dest_path
+
+    - name: DEBUG dest_path bytes (detecta \r e caracteres invisíveis)
+      shell: |
+        python3 - <<'PY'
+        import os
+        p = {{ dest_path | to_json }}
+        print("repr:", repr(p))
+        print("len:", len(p))
+        print("hex:", " ".join(hex(ord(c)) for c in p))
+        PY
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Normalizar dest_path (remove CRLF e espaços no final)
+      set_fact:
+        dest_path_clean: "{{ dest_path | regex_replace('\r','') | regex_replace('\\s+$','') }}"
+
+    - name: DEBUG dest_path_clean
+      debug:
+        var: dest_path_clean
+
+    - name: Verificar se destino existe
+      ansible.builtin.stat:
+        path: "{{ dest_path_clean }}"
+      register: dest_check
+
+    - name: Falhar se destino não existir
+      ansible.builtin.fail:
+        msg: "Destino {{ dest_path_clean }} não existe (original={{ dest_path }})"
+      when: not dest_check.stat.exists
+
+    - name: Calcular hash do destino (antes do backup)
+      ansible.builtin.shell: |
+        (cd "{{ dest_path_clean }}" && \
+         find . -type f -exec sha256sum {} \; | sort | sha256sum | awk '{print $1}')
+      args:
+        executable: /bin/bash
+      register: dest_hash_before
+      changed_when: false
+
+    - name: Criar diretório de backup
+      ansible.builtin.file:
+        path: "{{ backup_dir }}"
+        state: directory
+        recurse: yes
+
+    - name: Executar backup via rsync
+      ansible.builtin.command: >
+        rsync -a --delete
+        "{{ dest_path_clean }}/"
+        "{{ backup_dir }}/"
+
+    - name: Calcular hash do backup
+      ansible.builtin.shell: |
+        (cd "{{ backup_dir }}" && \
+         find . -type f -exec sha256sum {} \; | sort | sha256sum | awk '{print $1}')
+      args:
+        executable: /bin/bash
+      register: backup_hash
+      changed_when: false
+
+    - name: Validar integridade do backup
+      ansible.builtin.fail:
+        msg: |
+          Backup inválido!
+          Origem : {{ dest_hash_before.stdout }}
+          Backup : {{ backup_hash.stdout }}
+      when: dest_hash_before.stdout != backup_hash.stdout
+
+    - name: Backup validado com sucesso
+      ansible.builtin.debug:
+        msg: "Backup íntegro (hash OK)"
